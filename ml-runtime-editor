@@ -12,12 +12,11 @@ export JUPYTER_SERVER_TIMEOUT_SECONDS=${JUPYTER_SERVER_TIMEOUT_SECONDS:-300}
 
 export JUPYTER_LOG_LEVEL=${JUPYTER_LOG_LEVEL:-ERROR}
 CML_JUPYTER_ENSURE_NATIVE_KERNEL=${CML_JUPYTER_ENSURE_NATIVE_KERNEL:-True}
-JUPYTERLAB_DIR=${JUPYTERLAB_DIR_OVERRIDE:-/usr/local}
 
 # cull_interval below means how often to check for inactivity (to apply timeout rules)
 # nonzero return code indicates jupyterlab internal failure.
 # `bash -e` relays this return code to the parent process.
-"${JUPYTERLAB_DIR}"/bin/jupyter lab \
+jupyter lab \
     --no-browser \
     --ip=127.0.0.1 \
     --port="${CDSW_APP_PORT}" \
