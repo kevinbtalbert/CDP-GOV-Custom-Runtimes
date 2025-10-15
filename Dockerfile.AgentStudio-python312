@@ -83,14 +83,14 @@ RUN pip install uv==0.5.29
 # The base image has no package manager available, so package removal for CVEs
 # must be handled by using a different base image or contacting image maintainer
 
-# Copy everything from builder with correct permissions
-COPY --from=builder --chown=cdsw:cdsw --chmod=755 /studio_app /studio_app
+# Copy everything from builder - we'll fix permissions after
+COPY --from=builder /studio_app /studio_app
 
-# Fix permissions on virtual environments - ensure cdsw user can execute python
-RUN chmod -R 755 /studio_app/.venv && \
-    chmod -R 755 /studio_app/studio/workflow_engine/.venv && \
-    chown -R cdsw:cdsw /studio_app/.venv && \
-    chown -R cdsw:cdsw /studio_app/studio/workflow_engine/.venv
+# Fix all permissions - ensure cdsw user owns everything and can execute
+RUN chown -R cdsw:cdsw /studio_app && \
+    chmod -R u+rwX,go+rX /studio_app && \
+    chmod -R 755 /studio_app/.venv/bin && \
+    chmod -R 755 /studio_app/studio/workflow_engine/.venv/bin
 
 # Remove what we don't need in runtime and do minimal permission fixes
 RUN rm -rf \
@@ -157,9 +157,9 @@ ENV ML_RUNTIME_EDITION="Agent Studio for GovCloud" \
     ML_RUNTIME_EDITOR="JupyterLab" \
     ML_RUNTIME_METADATA_VERSION=2 \ 
     ML_RUNTIME_JUPYTER_KERNEL_NAME="python3" \
-    ML_RUNTIME_FULL_VERSION="2.0.0.60" \
+    ML_RUNTIME_FULL_VERSION="2.0.0.61" \
     ML_RUNTIME_SHORT_VERSION="2.0.0" \
-    ML_RUNTIME_MAINTENANCE_VERSION=60 \
+    ML_RUNTIME_MAINTENANCE_VERSION=61 \
     ML_RUNTIME_GIT_HASH=$"8464d17af7a8a1e0875de65b4e9a7a41deef1cff" \
     ML_RUNTIME_GBN=71591108 \
     JUPYTERLAB_WORKSPACES_DIR=/tmp

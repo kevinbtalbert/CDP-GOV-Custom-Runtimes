@@ -23,7 +23,7 @@ A comprehensive runtime for building and deploying Cloudera AI Agent Studio appl
 # Build latest version (main branch)
 docker build --pull --rm \
   -f Dockerfile.AgentStudio-python312 \
-  -t kevintalbert/cdpgovcustomruntimes:agentstudio-v2.0.0.60 \
+  -t kevintalbert/cdpgovcustomruntimes:agentstudio-v2.0.0.61 \
   .
 ```
 
@@ -31,11 +31,11 @@ docker build --pull --rm \
 - **Edition**: Agent Studio for GovCloud
 - **Editor**: JupyterLab
 - **Kernel**: Agent Studio
-- **Version**: 2.0.0.60
+- **Version**: 2.0.0.61
 
 **Use in CAI:**
 ```
-kevintalbert/cdpgovcustomruntimes:agentstudio-v2.0.0.60
+kevintalbert/cdpgovcustomruntimes:agentstudio-v2.0.0.61
 ```
 
 ---
