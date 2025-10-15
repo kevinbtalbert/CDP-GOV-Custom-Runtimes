@@ -86,6 +86,12 @@ RUN pip install uv==0.5.29
 # Copy everything from builder with correct permissions
 COPY --from=builder --chown=cdsw:cdsw --chmod=755 /studio_app /studio_app
 
+# Fix permissions on virtual environments - ensure cdsw user can execute python
+RUN chmod -R 755 /studio_app/.venv && \
+    chmod -R 755 /studio_app/studio/workflow_engine/.venv && \
+    chown -R cdsw:cdsw /studio_app/.venv && \
+    chown -R cdsw:cdsw /studio_app/studio/workflow_engine/.venv
+
 # Remove what we don't need in runtime and do minimal permission fixes
 RUN rm -rf \
         /studio_app/.git \
@@ -105,23 +111,45 @@ RUN rm -rf \
 # Set NVM environment variable (copied from builder stage)
 ENV NVM_DIR="/studio_app/.nvm"
 
-# Recreate Node.js symlinks (they weren't copied from builder stage)
+# Recreate Node.js symlinks and setup NVM for runtime
 RUN NODE_VERSION=$(ls "$NVM_DIR/versions/node" | grep "^v22" | head -n 1) && \
     ln -sf "$NVM_DIR/versions/node/$NODE_VERSION/bin/node" /usr/local/bin/node && \
     ln -sf "$NVM_DIR/versions/node/$NODE_VERSION/bin/npm" /usr/local/bin/npm && \
-    ln -sf "$NVM_DIR/versions/node/$NODE_VERSION/bin/npx" /usr/local/bin/npx
+    ln -sf "$NVM_DIR/versions/node/$NODE_VERSION/bin/npx" /usr/local/bin/npx && \
+    echo "Node.js runtime version: $NODE_VERSION" && \
+    echo "export NVM_DIR=\"$NVM_DIR\"" > /etc/profile.d/nvm.sh && \
+    echo "[ -s \"\$NVM_DIR/nvm.sh\" ] && . \"\$NVM_DIR/nvm.sh\"" >> /etc/profile.d/nvm.sh && \
+    echo "export PATH=\"\$NVM_DIR/versions/node/$NODE_VERSION/bin:\$PATH\"" >> /etc/profile.d/nvm.sh && \
+    chmod 755 /etc/profile.d/nvm.sh && \
+    echo "source /etc/profile.d/nvm.sh" >> /etc/bash.bashrc && \
+    echo "export NVM_DIR=\"$NVM_DIR\"" >> /home/cdsw/.bashrc && \
+    echo "[ -s \"\$NVM_DIR/nvm.sh\" ] && . \"\$NVM_DIR/nvm.sh\"" >> /home/cdsw/.bashrc && \
+    echo "export PATH=\"\$NVM_DIR/versions/node/$NODE_VERSION/bin:\$PATH\"" >> /home/cdsw/.bashrc && \
+    chown cdsw:cdsw /home/cdsw/.bashrc
 
 # Install production Node.js dependencies using the copied NVM from builder
 RUN npm ci --only=production && npm cache clean --force
-    
 
+# Create a wrapper script for nvm command to ensure it's always sourced
+RUN echo '#!/bin/bash' > /usr/local/bin/nvm && \
+    echo 'export NVM_DIR="/studio_app/.nvm"' >> /usr/local/bin/nvm && \
+    echo '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"' >> /usr/local/bin/nvm && \
+    echo 'nvm "$@"' >> /usr/local/bin/nvm && \
+    chmod +x /usr/local/bin/nvm
 
 # Set environment variables
 ENV AGENT_STUDIO_DEPLOY_MODE=runtime
 ENV IS_COMPOSABLE=true
 ENV APP_DIR=/studio_app
-ENV PATH="/studio_app/.venv/bin:/usr/local/bin:$PATH"
 ENV APP_DATA_DIR=/home/cdsw/agent-studio
+
+# Update PATH to include venv and node binaries
+# We dynamically determine the Node.js version path at build time
+RUN NODE_VERSION=$(ls "$NVM_DIR/versions/node" | grep "^v22" | head -n 1) && \
+    echo "export PATH=\"/studio_app/.venv/bin:$NVM_DIR/versions/node/$NODE_VERSION/bin:/usr/local/bin:\$PATH\"" >> /etc/profile.d/agent-studio-path.sh && \
+    chmod 755 /etc/profile.d/agent-studio-path.sh
+
+ENV PATH="/studio_app/.venv/bin:/usr/local/bin:$PATH"
 
 ENV ML_RUNTIME_EDITION="Agent Studio for GovCloud" \
     ML_RUNTIME_DESCRIPTION="Agent Studio runtime provided by Cloudera" \
@@ -129,9 +157,9 @@ ENV ML_RUNTIME_EDITION="Agent Studio for GovCloud" \
     ML_RUNTIME_EDITOR="JupyterLab" \
     ML_RUNTIME_METADATA_VERSION=2 \ 
     ML_RUNTIME_JUPYTER_KERNEL_NAME="python3" \
-    ML_RUNTIME_FULL_VERSION="2.0.0.59" \
+    ML_RUNTIME_FULL_VERSION="2.0.0.60" \
     ML_RUNTIME_SHORT_VERSION="2.0.0" \
-    ML_RUNTIME_MAINTENANCE_VERSION=59 \
+    ML_RUNTIME_MAINTENANCE_VERSION=60 \
     ML_RUNTIME_GIT_HASH=$"8464d17af7a8a1e0875de65b4e9a7a41deef1cff" \
     ML_RUNTIME_GBN=71591108 \
     JUPYTERLAB_WORKSPACES_DIR=/tmp
