@@ -1,0 +1,155 @@
+# Cloudera AI Agent Studio Custom Runtime for GovCloud
+#
+# This Dockerfile builds Agent Studio by cloning the source from GitHub.
+# No need to manually clone the repository - it's done during the build.
+#
+# Build command:
+#   docker build -f Dockerfile.AgentStudio-python312 -t your-image-name:tag .
+#
+# To build a specific version/tag/branch:
+#   docker build --build-arg AGENT_STUDIO_VERSION=v2.0.0 -f Dockerfile.AgentStudio-python312 -t your-image-name:tag .
+#
+# Source: https://github.com/cloudera/CAI_STUDIO_AGENT
+#
+FROM --platform=linux/amd64 container-public.repo.cdp.clouderagovt.com/cloudera-public/cloudera/cdsw/ml-runtime-pbj-workbench-python3.12-govcloud:2025.07.1-b6 AS builder
+
+USER root
+WORKDIR /build
+
+# Note: Base image has no package manager (apt/yum/dnf/microdnf)
+# Assuming required tools (curl, gcc, make, git) are pre-installed in the Cloudera ML Runtime
+# If tools are missing, build will fail at the step that needs them
+
+# Clone Agent Studio source code from GitHub
+# You can override this version with --build-arg AGENT_STUDIO_VERSION=<tag/branch>
+ARG AGENT_STUDIO_VERSION=main
+RUN git clone --depth 1 --branch ${AGENT_STUDIO_VERSION} https://github.com/cloudera/CAI_STUDIO_AGENT.git /studio_app
+
+# Set working directory to cloned source
+WORKDIR /studio_app
+
+# Install uv
+RUN pip install uv==0.5.29
+
+# Install NVM and Node.js 22
+ENV NVM_DIR="/studio_app/.nvm"
+RUN mkdir -p "$NVM_DIR"
+
+# Download and install NVM
+RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+
+# Install Node.js 22 using NVM
+# Note: BusyBox 'ls' doesn't support -q flag, so nvm use/alias fail
+# We install node and reference it directly by version path
+RUN . "$NVM_DIR/nvm.sh" && nvm install 22
+
+# Create symlinks to make node and npm available globally
+# Directly reference the installed version (v22.x.x) since nvm use fails with BusyBox
+RUN NODE_VERSION=$(ls "$NVM_DIR/versions/node" | grep "^v22" | head -n 1) && \
+    ln -sf "$NVM_DIR/versions/node/$NODE_VERSION/bin/node" /usr/local/bin/node && \
+    ln -sf "$NVM_DIR/versions/node/$NODE_VERSION/bin/npm" /usr/local/bin/npm && \
+    ln -sf "$NVM_DIR/versions/node/$NODE_VERSION/bin/npx" /usr/local/bin/npx && \
+    echo "Installed Node.js version: $NODE_VERSION"
+
+# Install Python dependencies WITHOUT --all-extras (no extras defined anyway)
+RUN uv sync --no-dev
+
+# Install Node.js dependencies
+RUN npm install
+
+# Build Next.js application
+RUN npm run build
+
+# Clean up build artifacts
+RUN rm -rf node_modules && npm cache clean --force
+
+# Create workflow engine virtual environment
+RUN cd studio/workflow_engine && \
+    uv venv && \
+    VIRTUAL_ENV=.venv uv sync --no-dev
+
+# Stage 2: Runtime stage
+FROM --platform=linux/amd64 container-public.repo.cdp.clouderagovt.com/cloudera-public/cloudera/cdsw/ml-runtime-pbj-workbench-python3.12-govcloud:2025.07.1-b6
+
+USER root
+RUN mkdir -p /studio_app && chown cdsw:cdsw /studio_app
+WORKDIR /studio_app
+
+# Note: Base image has no package manager - assuming curl is pre-installed
+# Install only uv in runtime
+RUN pip install uv==0.5.29
+
+# Note: The Ubuntu 24 CVE fixes are not applicable to this Red Hat UBI8 base image
+# The base image has no package manager available, so package removal for CVEs
+# must be handled by using a different base image or contacting image maintainer
+
+# Copy everything from builder with correct permissions
+COPY --from=builder --chown=cdsw:cdsw --chmod=755 /studio_app /studio_app
+
+# Remove what we don't need in runtime and do minimal permission fixes
+RUN rm -rf \
+        /studio_app/.git \
+        /studio_app/docs \
+        /studio_app/tests \
+        /studio_app/.pytest_cache \
+        /studio_app/__pycache__ \
+        /studio_app/node_modules \
+        /studio_app/eslint.config.mjs \
+        /studio_app/tailwind.config.js \
+        /studio_app/tsconfig.json \
+        /studio_app/postcss.config.js \
+        /studio_app/components.json \
+        /studio_app/.prettierrc \
+        /studio_app/next.config.ts
+
+# Set NVM environment variable (copied from builder stage)
+ENV NVM_DIR="/studio_app/.nvm"
+
+# Recreate Node.js symlinks (they weren't copied from builder stage)
+RUN NODE_VERSION=$(ls "$NVM_DIR/versions/node" | grep "^v22" | head -n 1) && \
+    ln -sf "$NVM_DIR/versions/node/$NODE_VERSION/bin/node" /usr/local/bin/node && \
+    ln -sf "$NVM_DIR/versions/node/$NODE_VERSION/bin/npm" /usr/local/bin/npm && \
+    ln -sf "$NVM_DIR/versions/node/$NODE_VERSION/bin/npx" /usr/local/bin/npx
+
+# Install production Node.js dependencies using the copied NVM from builder
+RUN npm ci --only=production && npm cache clean --force
+    
+
+
+# Set environment variables
+ENV AGENT_STUDIO_DEPLOY_MODE=runtime
+ENV IS_COMPOSABLE=true
+ENV APP_DIR=/studio_app
+ENV PATH="/studio_app/.venv/bin:/usr/local/bin:$PATH"
+ENV APP_DATA_DIR=/home/cdsw/agent-studio
+
+ENV ML_RUNTIME_EDITION="Agent Studio for GovCloud" \
+    ML_RUNTIME_DESCRIPTION="Agent Studio runtime provided by Cloudera" \
+    ML_RUNTIME_KERNEL="Agent Studio" \
+    ML_RUNTIME_EDITOR="JupyterLab" \
+    ML_RUNTIME_METADATA_VERSION=2 \ 
+    ML_RUNTIME_JUPYTER_KERNEL_NAME="python3" \
+    ML_RUNTIME_FULL_VERSION="2.0.0.59" \
+    ML_RUNTIME_SHORT_VERSION="2.0.0" \
+    ML_RUNTIME_MAINTENANCE_VERSION=59 \
+    ML_RUNTIME_GIT_HASH=$"8464d17af7a8a1e0875de65b4e9a7a41deef1cff" \
+    ML_RUNTIME_GBN=71591108 \
+    JUPYTERLAB_WORKSPACES_DIR=/tmp
+
+LABEL \
+    com.cloudera.ml.runtime.runtime-metadata-version=$ML_RUNTIME_METADATA_VERSION \
+    com.cloudera.ml.runtime.edition=$ML_RUNTIME_EDITION \
+    com.cloudera.ml.runtime.description=$ML_RUNTIME_DESCRIPTION \
+    com.cloudera.ml.runtime.editor=$ML_RUNTIME_EDITOR \
+    com.cloudera.ml.runtime.full-version=$ML_RUNTIME_FULL_VERSION \
+    com.cloudera.ml.runtime.short-version=$ML_RUNTIME_SHORT_VERSION \
+    com.cloudera.ml.runtime.kernel=$ML_RUNTIME_KERNEL \
+    com.cloudera.ml.runtime.maintenance-version=$ML_RUNTIME_MAINTENANCE_VERSION \
+    com.cloudera.ml.runtime.git-hash=$ML_RUNTIME_GIT_HASH \
+    com.cloudera.ml.runtime.gbn=$ML_RUNTIME_GBN
+    
+
+COPY ml-runtime-editor /usr/local/bin/ml-runtime-editor
+RUN chmod +x /usr/local/bin/ml-runtime-editor
+
+RUN pip3 install jupyterlab
