@@ -28,8 +28,25 @@ RUN git clone --depth 1 --branch ${AGENT_STUDIO_VERSION} https://github.com/clou
 # Set working directory to cloned source
 WORKDIR /studio_app
 
+# Force Python 3.12 usage by overwriting .python-version
+# This prevents uv from downloading Python 3.10 at runtime
+RUN echo "3.12" > .python-version && \
+    echo "3.12" > studio/workflow_engine/.python-version
+
+# Patch workbench.py to prioritize Python 3.12 in the runtime search path
+# Original: python_versions = ["python3.10", "python3.11", "python3.9"]
+# Updated: python_versions = ["python3.12", "python3.10", "python3.11", "python3.9"]
+RUN sed -i 's/python_versions = \["python3\.10", "python3\.11", "python3\.9"\]/python_versions = ["python3.12", "python3.10", "python3.11", "python3.9"]/' \
+    studio/workflow_engine/src/engine/entry/workbench.py
+
 # Install uv
 RUN pip install uv==0.5.29
+
+# Use system Python 3.12 (FIPS-compliant) for virtual environments
+# The base image already has Python 3.12 with FIPS OpenSSL support
+RUN python3.12 --version && \
+    python3.12 -c "import sys; print(f'Python: {sys.version}')" && \
+    python3.12 -c "import ssl; print(f'OpenSSL: {ssl.OPENSSL_VERSION}')"
 
 # Install NVM and Node.js 22
 ENV NVM_DIR="/studio_app/.nvm"
@@ -51,22 +68,29 @@ RUN NODE_VERSION=$(ls "$NVM_DIR/versions/node" | grep "^v22" | head -n 1) && \
     ln -sf "$NVM_DIR/versions/node/$NODE_VERSION/bin/npx" /usr/local/bin/npx && \
     echo "Installed Node.js version: $NODE_VERSION"
 
-# Install Python dependencies WITHOUT --all-extras (no extras defined anyway)
-RUN uv sync --no-dev
+# Install Python dependencies using system FIPS-compliant Python 3.12
+# Note: Force uv to use Python 3.12 even though pyproject.toml specifies Python 3.10
+ENV UV_PYTHON_PREFERENCE=only-system
+RUN uv venv --python python3.12 && \
+    uv sync --no-dev --python python3.12
 
 # Install Node.js dependencies
 RUN npm install
 
 # Build Next.js application
-RUN npm run build
+# Set Node.js options to reduce memory pressure and avoid QEMU segfaults during cross-compilation
+# Disable Next.js telemetry and reduce parallelism to avoid QEMU crashes
+RUN NEXT_TELEMETRY_DISABLED=1 \
+    NODE_OPTIONS="--max-old-space-size=2048" \
+    npm run build -- --no-lint
 
 # Clean up build artifacts
 RUN rm -rf node_modules && npm cache clean --force
 
-# Create workflow engine virtual environment
+# Create workflow engine virtual environment using system Python 3.12
 RUN cd studio/workflow_engine && \
-    uv venv && \
-    VIRTUAL_ENV=.venv uv sync --no-dev
+    uv venv --python python3.12 && \
+    VIRTUAL_ENV=.venv uv sync --no-dev --python python3.12
 
 # Stage 2: Runtime stage
 FROM --platform=linux/amd64 container-public.repo.cdp.clouderagovt.com/cloudera-public/cloudera/cdsw/ml-runtime-pbj-workbench-python3.12-govcloud:2025.07.1-b6
@@ -83,14 +107,26 @@ RUN pip install uv==0.5.29
 # The base image has no package manager available, so package removal for CVEs
 # must be handled by using a different base image or contacting image maintainer
 
-# Copy everything from builder - we'll fix permissions after
+# Copy everything from builder
 COPY --from=builder /studio_app /studio_app
 
-# Fix all permissions - ensure cdsw user owns everything and can execute
+# Force uv to use system Python 3.12 at runtime (prevents downloading Python 3.10)
+# Set explicit database path to avoid any path resolution issues
+ENV UV_PYTHON_PREFERENCE=only-system \
+    UV_PYTHON=python3.12 \
+    AGENT_STUDIO_SQLITE_DB=/home/cdsw/agent-studio/.app/state.db
+
+# Set ownership and permissions for cdsw user
 RUN chown -R cdsw:cdsw /studio_app && \
-    chmod -R u+rwX,go+rX /studio_app && \
-    chmod -R 755 /studio_app/.venv/bin && \
-    chmod -R 755 /studio_app/studio/workflow_engine/.venv/bin
+    chmod -R 755 /studio_app/.venv /studio_app/studio/workflow_engine/.venv && \
+    test -d /studio_app/bin && chmod -R 755 /studio_app/bin || true && \
+    test -d /studio_app/studio/bin && chmod -R 755 /studio_app/studio/bin || true && \
+    echo "Verifying venv permissions and FIPS Python 3.12:" && \
+    ls -la /studio_app/.venv/bin/python* && \
+    ls -la /studio_app/studio/workflow_engine/.venv/bin/python* && \
+    echo "Testing Python access and SSL:" && \
+    su -c "/studio_app/.venv/bin/python3 --version" cdsw && \
+    su -c "/studio_app/.venv/bin/python3 -c 'import ssl; print(\"SSL:\", ssl.OPENSSL_VERSION)'" cdsw
 
 # Remove what we don't need in runtime and do minimal permission fixes
 RUN rm -rf \
@@ -157,9 +193,9 @@ ENV ML_RUNTIME_EDITION="Agent Studio for GovCloud" \
     ML_RUNTIME_EDITOR="JupyterLab" \
     ML_RUNTIME_METADATA_VERSION=2 \ 
     ML_RUNTIME_JUPYTER_KERNEL_NAME="python3" \
-    ML_RUNTIME_FULL_VERSION="2.0.0.61" \
+    ML_RUNTIME_FULL_VERSION="2.0.0.71" \
     ML_RUNTIME_SHORT_VERSION="2.0.0" \
-    ML_RUNTIME_MAINTENANCE_VERSION=61 \
+    ML_RUNTIME_MAINTENANCE_VERSION=71 \
     ML_RUNTIME_GIT_HASH=$"8464d17af7a8a1e0875de65b4e9a7a41deef1cff" \
     ML_RUNTIME_GBN=71591108 \
     JUPYTERLAB_WORKSPACES_DIR=/tmp
@@ -181,3 +217,42 @@ COPY ml-runtime-editor /usr/local/bin/ml-runtime-editor
 RUN chmod +x /usr/local/bin/ml-runtime-editor
 
 RUN pip3 install jupyterlab
+
+# Ensure cdsw user home directory has proper permissions
+# Note: /home/cdsw/agent-studio appears to be a mounted volume in CAI,
+# so we create a startup script to initialize symlinks and directories at runtime
+RUN mkdir -p /home/cdsw && \
+    chown -R cdsw:cdsw /home/cdsw && \
+    chmod -R 755 /home/cdsw
+
+# Create initialization script that runs at container startup
+RUN mkdir -p /usr/local/bin && \
+    cat > /usr/local/bin/init-agent-studio-dirs.sh << 'INIT_SCRIPT'
+#!/bin/bash
+# Initialize Agent Studio directories and symlinks
+# This runs at startup because /home/cdsw/agent-studio is a mounted volume
+
+# Create .app directory for SQLite database
+mkdir -p /home/cdsw/agent-studio/.app
+chmod 755 /home/cdsw/agent-studio/.app
+
+# Create symlinks to /studio_app resources (if they don't exist)
+[ ! -e /home/cdsw/agent-studio/bin ] && ln -s /studio_app/bin /home/cdsw/agent-studio/bin
+[ ! -e /home/cdsw/agent-studio/alembic ] && ln -s /studio_app/alembic /home/cdsw/agent-studio/alembic
+[ ! -e /home/cdsw/agent-studio/.venv ] && ln -s /studio_app/.venv /home/cdsw/agent-studio/.venv
+[ ! -e /home/cdsw/agent-studio/studio ] && ln -s /studio_app/studio /home/cdsw/agent-studio/studio
+
+exit 0
+INIT_SCRIPT
+RUN chmod +x /usr/local/bin/init-agent-studio-dirs.sh
+
+# Patch the Python startup script to call our initialization script
+# Insert the initialization right after initialize_app_paths() but before subprocess.run
+RUN sed -i '/^initialize_app_paths()$/a\
+\
+# Initialize Agent Studio directories and symlinks at runtime\
+subprocess.run(["/usr/local/bin/init-agent-studio-dirs.sh"], check=True)' /studio_app/startup_scripts/run-app.py
+
+# Switch to cdsw user for runtime (Cloudera AI runs as this user)
+USER cdsw
+WORKDIR /home/cdsw

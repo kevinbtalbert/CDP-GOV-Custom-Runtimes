@@ -23,19 +23,19 @@ A comprehensive runtime for building and deploying Cloudera AI Agent Studio appl
 # Build latest version (main branch)
 docker build --pull --rm \
   -f Dockerfile.AgentStudio-python312 \
-  -t kevintalbert/cdpgovcustomruntimes:agentstudio-v2.0.0.61 \
+  -t kevintalbert/cdpgovcustomruntimes:agentstudio-v2.0.0.71 \
   .
 ```
 
 **Runtime Metadata:**
 - **Edition**: Agent Studio for GovCloud
 - **Editor**: JupyterLab
-- **Kernel**: Agent Studio
-- **Version**: 2.0.0.61
+- **Kernel**: Agent Studio (Python 3.12 FIPS-Compliant)
+- **Version**: 2.0.0.71
 
 **Use in CAI:**
 ```
-kevintalbert/cdpgovcustomruntimes:agentstudio-v2.0.0.61
+kevintalbert/cdpgovcustomruntimes:agentstudio-v2.0.0.71
 ```
 
 ---
@@ -85,6 +85,89 @@ This is the official Cloudera ML Runtime for GovCloud with Python 3.12 support.
 After building, validate the runtime in CAI:
 
 ![Runtime Validation](validate-runtime.png)
+
+## FIPS Compliance
+
+### Is This Runtime FIPS Compliant?
+
+**Short Answer**: The runtime **inherits FIPS compliance from the base image**, but you must verify that added components maintain compliance.
+
+**Understanding FIPS in Containers:**
+
+✅ **What IS Inherited:**
+- FIPS-enabled OpenSSL from base image
+- FIPS-validated kernel crypto (if host is FIPS-enabled)
+- System-level crypto libraries
+- Base Python built against FIPS OpenSSL
+
+⚠️ **What Can Break FIPS:**
+- Python packages with bundled crypto (`cryptography`, `pycryptodome`, etc.)
+- Node.js modules with native crypto bindings
+- Any compiled extensions linking to non-FIPS crypto
+- Static binaries with embedded crypto
+
+### Verifying FIPS Compliance
+
+**Run the verification script inside your container:**
+
+```bash
+# Copy verification script into running container
+docker cp verify-fips.py <container-id>:/tmp/
+
+# Execute inside container
+docker exec -it <container-id> python3 /tmp/verify-fips.py
+```
+
+**Or in a CAI Session/Application:**
+
+```python
+# Upload verify-fips.py to your project
+# Run from terminal or notebook
+!python verify-fips.py
+```
+
+### FIPS Verification Checklist
+
+The script checks:
+1. ✅ **Kernel FIPS Mode** - Is `/proc/sys/crypto/fips_enabled` set to 1?
+2. ✅ **OpenSSL FIPS** - Is OpenSSL using FIPS module?
+3. ✅ **Python hashlib** - Does Python reject non-FIPS algorithms (MD5, SHA1) for security use?
+4. ✅ **OpenSSL Config** - Is FIPS configured in openssl.cnf?
+5. ✅ **Python Packages** - Are crypto packages using FIPS-compliant libraries?
+6. ✅ **Node.js Crypto** - Can Node.js enable FIPS mode?
+
+### Maintaining FIPS Compliance
+
+**Agent Studio Runtime Considerations:**
+
+1. **uv package manager**: Uses system Python crypto (FIPS-compliant)
+2. **Node.js/Next.js**: Uses OpenSSL from base image (should be FIPS)
+3. **Python dependencies**: Agent Studio's dependencies should use system crypto
+
+**Best Practices:**
+- Always run `verify-fips.py` after building
+- Test with your security team before production deployment
+- Document FIPS validation results
+- Monitor for dependency updates that could affect compliance
+
+**If FIPS Fails:**
+```bash
+# Check what packages might be problematic
+pip list | grep -E 'crypto|ssl|nacl|bcrypt'
+
+# Ensure Python uses FIPS-approved algorithms only
+python3 -c "import hashlib; hashlib.md5(b'test', usedforsecurity=True)"
+# Should raise: ValueError: [digital envelope routines] unsupported
+```
+
+### GovCloud FIPS Requirements
+
+The Cloudera GovCloud base image (`ml-runtime-pbj-workbench-python3.12-govcloud:2025.07.1-b6`) is built with FIPS compliance in mind:
+- Red Hat UBI8 FIPS-validated kernel
+- FIPS-enabled OpenSSL 1.1.1 or 3.x
+- Python built with `--with-openssl-rpath` against FIPS OpenSSL
+
+**Your responsibility**: Ensure added components (Agent Studio, npm packages, Python deps) don't introduce non-FIPS crypto.
 
 ## Technical Notes
 
